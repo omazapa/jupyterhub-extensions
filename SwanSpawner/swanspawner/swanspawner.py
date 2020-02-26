@@ -3,7 +3,7 @@
 
 """CERN Specific Spawner class"""
 
-import re
+import re, json
 import os, pwd, subprocess
 import time
 from tornado import gen
@@ -11,9 +11,10 @@ from traitlets import (
     Unicode,
     Bool,
     Int,
-    List,
     Dict
 )
+
+from jinja2 import Environment, FileSystemLoader
 
 import contextlib
 import random
@@ -37,35 +38,15 @@ def define_SwanSpawner_from(base_class):
 
     class SwanSpawner(base_class):
 
+        options_form_config = Unicode(
+            config=True,
+            help='Path to configuration file for options_form rendering.'
+        )
+
         lcg_view_path = Unicode(
             default_value='/cvmfs/sft.cern.ch/lcg/views',
             config=True,
             help='Path where LCG views are stored in CVMFS.'
-        )
-
-        lcg_rel_field = Unicode(
-            default_value='LCG-rel',
-            help='LCG release field of the Spawner form.'
-        )
-
-        platform_field = Unicode(
-            default_value='platform',
-            help='Platform field of the Spawner form.'
-        )
-
-        user_script_env_field = Unicode(
-            default_value='scriptenv',
-            help='User environment script field of the Spawner form.'
-        )
-
-        user_n_cores = Unicode(
-            default_value='ncores',
-            help='User number of cores field of the Spawner form.'
-        )
-
-        user_memory = Unicode(
-            default_value='memory',
-            help='User available memory field of the Spawner form.'
         )
 
         auth_script = Unicode(
@@ -108,11 +89,6 @@ def define_SwanSpawner_from(base_class):
             help='Path in CVMFS of the script to configure a K8s cluster.'
         )
 
-        spark_cluster_field = Unicode(
-            default_value='spark-cluster',
-            help='Spark cluster name field of the Spawner form.'
-        )
-
         spark_max_sessions = Int(
             default_value=1,
             config=True,
@@ -137,18 +113,6 @@ def define_SwanSpawner_from(base_class):
             help='End of the port range that is used by the user session (container).'
         )
 
-        available_cores = List(
-            default_value=['1'],
-            config=True,
-            help='List of cores options available to the user'
-        )
-
-        available_memory = List(
-            default_value=['8'],
-            config=True,
-            help='List of memory options available to the user'
-        )
-
         shared_volumes = Dict(
             config=True,
             help='Volumes to be mounted with a "shared" tag. This allows mount propagation.',
@@ -165,28 +129,79 @@ def define_SwanSpawner_from(base_class):
             help="Check if CVMFS is accessible. It only works if CVMFS is mounted in the host (not the case in ScienceBox)."
         )
 
-
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self.offload = False
-            self.this_host = gethostname().split('.')[0]
+            self.options_form = self.render_options_form
+            
+        @staticmethod
+        def get_user_gid(username):
+            return str(pwd.getpwnam(username).pw_gid)
+
+        @staticmethod
+        def get_user_id(username):
+            return str(pwd.getpwnam(username).pw_uid)
+
+        @staticmethod
+        def get_hostname():
+            return gethostname().split('.')[0]
+
+        def get_lcg_view_path(self):
+            return self.lcg_view_path
+
+        def get_lcg_release(self):
+            return self.user_options['LCG-rel']
+
+        def get_lcg_platform(self):
+            return self.user_options['platform']
+
+        def get_user_env_script_path(self):
+            return self.user_options['scriptenv']
+
+        def get_user_cores(self):
+            return self.user_options['ncores']
+
+        def get_user_memory(self):
+            return self.user_options['memory']
+
+        def get_spark_cluster(self):
+            return self.user_options['spark-cluster']
+
+        def get_options_form_config(self):
+            if self.options_form_config:
+                options_form_config = self.options_form_config
+            else:
+                options_form_config = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    'templates',
+                    'options_form_default_config.json')
+
+            try:
+                with open(options_form_config) as json_file:
+                    return json.load(json_file)
+            except Exception as ex:
+                self.log.error("Could not initialize form: %s", ex, exc_info=True)
+                raise RuntimeError(
+                    """
+                    Could not initialize form, invalid format
+                    """)
+
+        def render_options_form(self, spawner):
+            templates_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+            env = Environment(loader=FileSystemLoader(templates_dir))
+            template = env.get_template('options_form_template.html')
+            return template.render(options_form_config=self.get_options_form_config())
 
         def options_from_form(self, formdata):
+            """ Fills self.user_options with required fields.
+            The fields in the form are based on swanspawner/templates/options_form_template.html
+            """
             options = {}
-            options[self.lcg_rel_field]         = formdata[self.lcg_rel_field][0]
-
-            # FIXME: temporary until NXCALS moves to LCG96
-            if options[self.lcg_rel_field] == 'LCG_95apython3_nxcals':
-                options[self.platform_field] = 'x86_64-centos7-gcc7-opt'
-            else:
-                options[self.platform_field] = formdata[self.platform_field][0]
-
-            options[self.user_script_env_field] = formdata[self.user_script_env_field][0]
-            options[self.spark_cluster_field]   = formdata[self.spark_cluster_field][0] if self.spark_cluster_field in formdata.keys() else 'none'
-            options[self.user_n_cores]          = int(formdata[self.user_n_cores][0]) if formdata[self.user_n_cores][0] in self.available_cores else int(self.available_cores[0])
-            options[self.user_memory]           = formdata[self.user_memory][0] + 'G' if formdata[self.user_memory][0] in self.available_memory else self.available_memory[0] + 'G'
-
-            self.offload = options[self.spark_cluster_field] != 'none'
+            options['LCG-rel']         = formdata['LCG-rel'][0]
+            options['platform']         = formdata['platform'][0]
+            options['scriptenv'] = formdata['scriptenv'][0]
+            options['ncores']          = int(formdata['ncores'][0])
+            options['memory']           = formdata['memory'][0] + 'G'
+            options['spark-cluster']   = formdata['spark-cluster'][0] if 'spark-cluster' in formdata.keys() else 'none'
 
             return options
 
@@ -196,20 +211,19 @@ def define_SwanSpawner_from(base_class):
             """
             env = super().get_env()
 
-            username = self.user.name
-            userid = pwd.getpwnam(username).pw_uid
             if self.local_home:
-                homepath = "/scratch/%s" %(username)
+                homepath = "/scratch/%s" %(self.user.name)
             else:
-                homepath = self.eos_path_format.format(username = username)
+                homepath = self.eos_path_format.format(username = self.user.name)
 
             env.update(dict(
-                ROOT_LCG_VIEW_NAME     = self.user_options[self.lcg_rel_field],
-                ROOT_LCG_VIEW_PLATFORM = self.user_options[self.platform_field],
-                USER_ENV_SCRIPT        = self.user_options[self.user_script_env_field],
-                ROOT_LCG_VIEW_PATH     = self.lcg_view_path,
-                USER                   = username,
-                USER_ID                = str(userid),
+                ROOT_LCG_VIEW_NAME     = self.get_lcg_release(),
+                ROOT_LCG_VIEW_PLATFORM = self.get_lcg_platform(),
+                USER_ENV_SCRIPT        = self.get_user_env_script_path(),
+                ROOT_LCG_VIEW_PATH     = self.get_lcg_view_path(),
+                USER                   = self.user.name,
+                USER_ID                = self.get_user_id(self.user.name),
+                USER_GID               = self.get_user_gid(self.user.name),
                 HOME                   = homepath,
                 EOS_PATH_FORMAT        = self.eos_path_format,
                 SERVER_HOSTNAME        = os.uname().nodename,
@@ -235,11 +249,12 @@ def define_SwanSpawner_from(base_class):
                 if not self.use_internal_ip:
                     self.extra_host_config['port_bindings'][self.port] = (self.host_ip,)
 
-                if self.offload:
-                    cluster = self.user_options[self.spark_cluster_field]
+                cluster = self.get_spark_cluster()
+                if cluster != 'none':
+
                     env['SPARK_CLUSTER_NAME'] 		    = cluster
-                    env['SPARK_USER'] 		            = username
-                    env['MAX_MEMORY']         	   	    = self.user_options[self.user_memory]
+                    env['SPARK_USER'] 		            = self.user.name
+                    env['MAX_MEMORY']         	   	    = self.get_user_memory()
 
                     if cluster == 'k8s':
                         env['SPARK_CONFIG_SCRIPT'] = self.k8s_config_script
@@ -279,7 +294,7 @@ def define_SwanSpawner_from(base_class):
 
             self._log_metric(
                 self.user.name,
-                self.this_host,
+                self.get_hostname(),
                 ".".join(["exit_container", "exit_code"]),
                 container_exit_code
             )
@@ -305,7 +320,7 @@ def define_SwanSpawner_from(base_class):
 
                 self._log_metric(
                     self.user.name,
-                    self.this_host,
+                    self.get_hostname(),
                     ".".join(["exit_container", "exit_code"]),
                     value_cleaned
                 )
@@ -319,11 +334,11 @@ def define_SwanSpawner_from(base_class):
             """
 
             username = self.user.name
-            platform = self.user_options[self.platform_field]
-            lcg_rel = self.user_options[self.lcg_rel_field]
-            cluster = self.user_options[self.spark_cluster_field]
-            cpu_quota = self.user_options[self.user_n_cores]
-            mem_limit = self.user_options[self.user_memory]
+            platform = self.get_lcg_platform()
+            lcg_rel = self.get_lcg_release()
+            cluster = self.get_spark_cluster()
+            cpu_quota = self.get_user_cores()
+            mem_limit = self.get_user_memory()
 
             try:
                 start_time_configure_user = time.time()
@@ -349,13 +364,13 @@ def define_SwanSpawner_from(base_class):
 
                 self._log_metric(
                     self.user.name,
-                    self.this_host,
-                    ".".join(["configure_user", lcg_rel, cluster, "duration_sec"]),
+                    self.get_hostname(),
+                    ".".join(["configure_user", "duration_sec"]),
                     time.time() - start_time_configure_user
                 )
 
                 # If the user selects a Spark Cluster we need to generate a token to allow him in
-                if self.offload:
+                if cluster != 'none':
                     start_time_configure_spark = time.time()
 
                     # FIXME: temporaly limit Cloud Container to specific platform and software stack
@@ -443,7 +458,7 @@ def define_SwanSpawner_from(base_class):
 
                     self._log_metric(
                         self.user.name,
-                        self.this_host,
+                        self.get_hostname(),
                         ".".join(["configure_spark", lcg_rel, cluster, "duration_sec"]),
                         time.time() - start_time_configure_spark
                     )
@@ -462,7 +477,7 @@ def define_SwanSpawner_from(base_class):
 
                 # Enabling GPU for cuda stacks
                 # Options to export nvidia device can be found in https://github.com/NVIDIA/nvidia-container-runtime#nvidia_require_
-                if "cu" in self.user_options[self.lcg_rel_field]:
+                if "cu" in lcg_rel:
                     self.env['NVIDIA_VISIBLE_DEVICES']='all'  # We are making visible all the devices, if the host has more that one can be used.
                     self.env['NVIDIA_DRIVER_CAPABILITIES']='compute,utility'
                     self.env['NVIDIA_REQUIRE_CUDA']='cuda>=10.0 driver>=410'
@@ -481,8 +496,8 @@ def define_SwanSpawner_from(base_class):
                 # log container start success metrics
                 self._log_metric(
                     self.user.name,
-                    self.this_host,
-                    ".".join(["start_container", lcg_rel, cluster, "duration_sec"]),
+                    self.get_hostname(),
+                    ".".join(["start_container", lcg_rel, "duration_sec"]),
                     time.time() - start_time_start_container
                 )
 

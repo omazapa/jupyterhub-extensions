@@ -157,6 +157,7 @@ class SwanDockerSpawner(define_SwanSpawner_from(SystemUserSpawner)):
         """
 
         # default values when spawned via API (e.g binder)
+        username = self.user.name
         platform = self.user_options.get(self.platform_field,'x86_64-centos7-gcc8-opt')
         lcg_rel = self.user_options.get(self.lcg_rel_field,'LCG_97python3')
         cluster = self.user_options.get(self.spark_cluster_field,'analytix')

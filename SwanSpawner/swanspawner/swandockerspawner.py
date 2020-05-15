@@ -105,6 +105,12 @@ class SwanDockerSpawner(define_SwanSpawner_from(SystemUserSpawner)):
             self.extra_host_config['port_bindings'] = {}
             self.extra_create_kwargs['ports'] = []
 
+            if self.lcg_rel_field not in self.user_options:
+                # session spawned via the API, in binder start notebook with jovyan user
+                self.extra_create_kwargs['working_dir'] = "/home/jovyan"
+                self.extra_create_kwargs['user'] = 'jovyan'
+                self.extra_create_kwargs['command'] = ["jupyterhub-singleuser","--ip=0.0.0.0","--NotebookApp.default_url=/lab"]
+
             # Avoid overriding the default container output port, defined by the Spawner
             if not self.use_internal_ip:
                 self.extra_host_config['port_bindings'][self.port] = (self.host_ip,)
@@ -150,12 +156,12 @@ class SwanDockerSpawner(define_SwanSpawner_from(SystemUserSpawner)):
         EOS, GPU support, authenticating HDFS and authenticating spark clusters.
         """
 
-        username = self.user.name
-        platform = self.user_options[self.platform_field]
-        lcg_rel = self.user_options[self.lcg_rel_field]
-        cluster = self.user_options[self.spark_cluster_field]
-        cpu_quota = self.user_options[self.user_n_cores]
-        mem_limit = self.user_options[self.user_memory]
+        # default values when spawned via API (e.g binder)
+        platform = self.user_options.get(self.platform_field,'x86_64-centos7-gcc8-opt')
+        lcg_rel = self.user_options.get(self.lcg_rel_field,'LCG_97python3')
+        cluster = self.user_options.get(self.spark_cluster_field,'analytix')
+        cpu_quota = self.user_options.get(self.user_n_cores,1)
+        mem_limit = self.user_options.get(self.user_memory,'8G')
 
         try:
             start_time_configure_user = time.time()
@@ -284,7 +290,7 @@ class SwanDockerSpawner(define_SwanSpawner_from(SystemUserSpawner)):
 
             # Enabling GPU for cuda stacks
             # Options to export nvidia device can be found in https://github.com/NVIDIA/nvidia-container-runtime#nvidia_require_
-            if "cu" in self.user_options[self.lcg_rel_field]:
+            if "cu" in lcg_rel:
                 self.env[
                     'NVIDIA_VISIBLE_DEVICES'] = 'all'  # We are making visible all the devices, if the host has more that one can be used.
                 self.env['NVIDIA_DRIVER_CAPABILITIES'] = 'compute,utility'
